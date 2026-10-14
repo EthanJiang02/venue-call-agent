@@ -1,0 +1,124 @@
+# What a green build does not prove
+
+Written down once, so the first real call is not mistaken for a formality.
+
+`npm run verify` and `npm run eval` are green on a laptop with no phone, no Google account and no
+database. That is worth a great deal and it is not the same as "this works." Everything below is
+outside what any test here can reach, with the reason no local substitute exists and who owns it.
+
+---
+
+## The transport
+
+**1. That the credential arrives at all.** The call token travels as a TwiML `<Parameter>` inside
+`<Connect><Stream>` and reaches the agent in the WebSocket `start` frame. Nothing enforces that
+shape in either repository — the backend's own token header says enforcement is at the dial site,
+and there is no dial site. Owner: **the carrier and first-dial work**.
+
+**2. Answering-machine detection.** Whether the carrier's detector fires before or after our first
+word, and how often it is wrong on a busy restaurant. Get this backwards and the disclosure is
+spoken to a beep, or a person hears silence. No local substitute: it is a carrier feature with
+carrier timing. Owner: **the carrier and first-dial work**.
+
+**3. DTMF.** Navigating a real phone menu means sending tones. The `phone-menu` fixture tests the
+*decision* to ask for a person; it cannot test pressing 2.
+
+**4. Barge-in and half-duplex,** including whether echo cancellation feeds our own voice back to
+us as input. On a bad line the agent can hear itself and interrupt itself. Only a real call shows
+that.
+
+⚠️ **Narrowed 2026-09-12, and only narrowed.** `npm run call` now runs a fixture whose far end
+deliberately talks over us, and `src/carrier/checks.ts` fails the build if we keep speaking for
+more than 120 ms after they start. So the *plumbing* of barge-in — that the interrupt is noticed
+and the outbound queue is actually thrown away — is covered, with a planted-fault test that proves
+the check can fail. What remains untestable here is everything acoustic: echo, whether the far
+end's voice arrives at all over ours, and whether Google's detector agrees with ours about when a
+human started talking. Do not read a green `stopped_when_interrupted` as "barge-in works on the
+phone".
+
+**5. End-to-end latency under jitter and loss.** The mock's `--latency` models the *seam* round
+trip and nothing else. There is no carrier, no network, no audio path. Numbers from `docs/TUNING.md`
+are a floor.
+
+**6. ASR accuracy against restaurant noise.** The largest single source of a wrong tool call, and
+completely unreproducible by typing sentences into a fixture. A kitchen at 6pm is not a quiet room.
+
+---
+
+## The one nobody can test even with a phone
+
+**7. Whether the restaurant thinks this was acceptable.** Nothing in a transcript says whether the
+manager found the call useful or found it a nuisance. That is what the ten-call soak and the
+one-campaign pilot are for, and it is why both are deliberately not ticketed: each needs a person's
+judgement on the day, not a check.
+
+---
+
+## Things a test could cover and does not, yet
+
+**8. When a call may be placed.** The agent's side is covered: the mock refuses
+`outside_opening_hours` (scenario `outside-opening-hours`) and the agent stops before speaking.
+The rules that *produce* that refusal — venue closed, opening hours missing, the peak-hours
+exclusion, the afternoon lull — are backend code, and **no test here exercises them.** They decide
+whether a call happens at all, and a venue without opening hours on record is refused, so the
+first real call needs hours entered for that venue by hand. The timing rule will not have been
+exercised by anything before it matters. Owner: the call-timing work.
+
+**9. Observability.** There is no logging, metric, trace or operator-visible surface for a call
+that goes wrong in production. This matters more here than in most features: **voice has no bounce
+and no complaint webhook.** The ledger is the only detector, and a call that fails in a way the
+ledger does not record is a call nobody will ever know about. Not ticketed. It should be.
+
+**10. Hearing it.** Every test in this repository asserts on transcripts, journals and DFT bins.
+Nothing renders a call to a speaker or a `.wav`. Until the Gemini adapter exists there is no audio
+to render — but the day it exists, being able to *listen* to a fixture is the fastest debugging
+tool available and it should be the first thing built alongside it.
+
+**11. Whether the fabrication check's second witness is independent.** `SPEECH_TO_TEXT_CREDENTIALS`
+exists so a transcriber other than the model can say what the model said. It is pinned to Google
+Cloud Speech-to-Text — the same vendor, likely the same project. Whether that counts as an
+independent witness of a Google model's speech is an open question nobody has asked, and its
+per-minute cost is unmeasured.
+
+---
+
+## Things believed true that are only deployed
+
+The backend half of this feature is on the backend's main line and deployed — and switched off:
+every seam route answers `seam_disabled` until the call-token secret is set on the service, and
+**none of it has been observed running.** That safety conclusion holds one way only: nothing is
+happening. It does not tell you that the code works.
+
+That distinction — merged, deployed, flagged off, observed working — is four different states, and
+this page keeps them apart on purpose. Do not collapse them when reporting progress.
+
+
+---
+
+## What the audio layer added, and what it did NOT
+
+Added 2026-09-12 with `src/carrier/`. `npm run call` runs every recorded conversation as a
+telephone call: real G.711 μ-law frames, 20 ms at a time, on a virtual clock, against a leg that
+speaks to nobody. It is a real instrument and it is worth being exact about its edges.
+
+**It can now see** — dead air per turn, measured off the wire; talking over an interruption; a
+frame of the wrong length; 0x00 "silence"; audio generated after the leg closed; an utterance the
+turn detector split in two.
+
+**It still cannot see, and these are not small:**
+
+**12. Whether Google's turn detector behaves like ours.** `src/carrier/vad.ts` has the same four
+parameter names and the same units as the Live API's `automaticActivityDetection`, and it is not
+their algorithm — theirs is unpublished and runs on their side. A sweep here tells you how a
+setting behaves against a known pause structure. It does not predict their behaviour, and the file
+says so at the top. Owner: the first real measurement, by **the Gemini Live adapter**.
+
+**13. Speech recognition, at all.** The far end's words are injected, not recognised. The audio
+envelope is real and is what the detector works on; the text is handed over once a turn ends.
+Every conversational check in this repository therefore still rests on a transcript somebody
+wrote, never on one a machine produced. This is the honest boundary of the whole test environment
+and it does not move until there is a real model in the loop.
+
+**14. What a voice sounds like.** The generated audio is a tone. Prosody, clipping, the difference
+between Puck and Charon, and whether a restaurant finds the delivery robotic are all outside it.
+`docs/TUNING.md` §3.4 is deliberately a listening test by a person, once, written down.

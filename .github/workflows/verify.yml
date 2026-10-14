@@ -1,0 +1,93 @@
+# The build gate for venue-call-agent.
+#
+# 🔴 THIS RUN IS A REQUIRED CHECK on `main` and `dev`. Neither merges without it green, plus one
+# approving review. `enforce_admins` is off, so an owner can still merge past it — write the checks
+# so that a red run is unmistakable, and read them.
+#
+# Matches platform-backend's ci.yml where it can: same runner, filtered pull_request trigger,
+# workflow_dispatch, npm ci against a committed lockfile, cache: npm. The action majors are newer
+# (checkout@v7, setup-node@v7) because the v4 majors target Node 20, which GitHub has deprecated.
+#
+# It deviates in one place on purpose — the no-facts guard runs BEFORE `npm ci`, with no
+# dependencies installed. That ordering is itself an assertion: this repo's load-bearing invariant
+# must be checkable by a machine that has been handed nothing. The one thing the guard may be
+# handed is the private venue-name list, and every other rule runs the same without it.
+
+name: verify
+
+# `dev` is in both lists and must stay there. It became the default and the integration branch on
+# 2026-09-16, and it requires this check to pass before anything merges. A required check that the
+# trigger never fires is not a strict gate, it is a deadlock: every pull request sits BLOCKED
+# waiting for a run that will never start.
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 🔴 FIRST, WITH NOTHING INSTALLED. Node is not even set up yet — the runner's own node runs
+      # it. The guard has no dependencies by design, and proving that every run is what stops it
+      # quietly acquiring one.
+      #
+      # It runs its own positive control and fails if the control does not trip: a guard that
+      # cannot detect a violation must never be allowed to report "clean".
+      #
+      # The real venue names come from the repository secret VENUE_NAMES, one per line, written to
+      # a file outside the checkout. GitHub withholds secrets from a fork's pull request, so that
+      # run checks the invented control name only; the push to `dev` after the merge checks the
+      # real list. The guard prints which of the two it did.
+      - name: no product facts in this repository
+        env:
+          VENUE_NAMES: ${{ secrets.VENUE_NAMES }}
+        run: |
+          if [ -n "$VENUE_NAMES" ]; then
+            printf '%s\n' "$VENUE_NAMES" > "$RUNNER_TEMP/venue-names.txt"
+            export VENUE_NAME_LIST_FILE="$RUNNER_TEMP/venue-names.txt"
+          fi
+          node scripts/check-no-facts.mjs
+
+      # Also before `npm ci`, and for the same reason: `npm run doctor` is the first thing a new
+      # person runs on a fresh clone, so it has to work on a machine that has been handed
+      # nothing. This runs only its positive control — the full reading is for a human, and its
+      # answer depends on the machine, which is not something CI can assert.
+      - name: the environment doctor can still see illness
+        run: node scripts/doctor.mjs --control
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      # `npm ci`, not `npm install` — house standard, and it is the difference between "the
+      # lockfile is honoured" and "whatever resolved today". It fails outright with no lockfile,
+      # which is the correct behaviour: this repo had none for a day and CI was red the whole time.
+      - name: install
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: test
+        run: npm test
+
+      # The conversation eval. Fails the build on HARD failures only — a call that did something
+      # it must never do. Soft failures (too long, too much unscripted glue) print and do not
+      # block, because those are judgements and a judgement that blocks a merge gets tuned until
+      # it stops blocking.
+      - name: eval the recorded conversations
+        run: npm run eval
+
+      # The same recorded conversations, run as telephone calls over real μ-law frames on a
+      # virtual clock. It grades what a transcript cannot show: dead air, talking over an
+      # interruption, audio written after the line closed. Fails on HARD only, same rule as the
+      # eval — and, like the eval, it runs its own positive control first and refuses to print a
+      # measurement if the control does not trip.
+      - name: run the conversations as audio calls
+        run: npm run call
